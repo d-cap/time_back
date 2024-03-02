@@ -11,6 +11,7 @@ chrono = "0.4.34"
 confy = "0.6.0"
 device_query = "2.0.0"
 eframe = "0.26.2"
+egui_extras = "0.26.2"
 humantime = "2.1.0"
 png = "0.17.13"
 serde = { version = "1.0.197", features = [ "derive" ] }
