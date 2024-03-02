@@ -12,6 +12,7 @@ use std::{
 use active_win_pos_rs::{get_active_window, ActiveWindow, WindowPosition};
 use device_query::{DeviceQuery, DeviceState, Keycode, MouseState};
 use eframe::egui::{self, Layout};
+use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_OUTPUT_DIRECTORY: &str = "~/.time_back";
@@ -193,13 +194,41 @@ impl eframe::App for TimeBack {
 
             if let Ok(mut config) = self.config.lock() {
                 if config.configured {
+                    let table_height = 20.;
+                    let table = TableBuilder::new(ui)
+                        .striped(true)
+                        .resizable(false)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::auto())
+                        .column(Column::remainder())
+                        .min_scrolled_height(0.0);
                     if let Ok(map) = self.window_time.lock() {
-                        for (n, d) in map.iter() {
-                            ui.label(format!(
-                                "App: '{n}' duration: {}",
-                                humantime::Duration::from(*d)
-                            ));
-                        }
+                        table.body(|mut body| {
+                            let mut overall = Duration::new(0, 0);
+                            for (n, d) in map.iter() {
+                                body.row(table_height, |mut row| {
+                                    row.col(|ui| {
+                                        ui.label(n);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(humantime::Duration::from(*d).to_string());
+                                    });
+                                    overall += *d;
+                                })
+                            }
+                            body.row(table_height, |mut row| {
+                                row.col(|_ui| {});
+                                row.col(|_ui| {});
+                            });
+                            body.row(table_height, |mut row| {
+                                row.col(|ui| {
+                                    ui.label("Overall");
+                                });
+                                row.col(|ui| {
+                                    ui.label(humantime::Duration::from(overall).to_string());
+                                });
+                            })
+                        });
                     }
                 } else {
                     if ui.button("Select output directory").clicked() {
