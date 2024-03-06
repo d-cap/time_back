@@ -2,8 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
-    hash::Hash,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex},
@@ -17,21 +16,10 @@ use egui_extras::{Column, TableBuilder};
 use egui_plot::{BarChart, Plot};
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_OUTPUT_DIRECTORY: &str = "~/.time_back";
-
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
 struct Config {
-    output_directory: String,
-    configured: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            output_directory: DEFAULT_OUTPUT_DIRECTORY.to_owned(),
-            configured: false,
-        }
-    }
+    output_directory: Option<String>,
+    processes_with_longer_tracking: HashSet<String>,
 }
 
 fn main() -> Result<(), eframe::Error> {
@@ -49,18 +37,25 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let file_name = generate_file_name();
-    let output_file = cfg.output_directory.to_owned() + "/" + &file_name;
-    let data: HashMap<String, Duration> = if Path::new(&output_file).exists() {
-        match std::fs::File::open(output_file) {
-            Ok(f) => serde_json::from_reader(f).unwrap_or(HashMap::new()),
-            Err(_) => HashMap::new(),
+    let (data, plot_data) = if let Some(output_directory) = &cfg.output_directory {
+        let output_file = output_directory.to_owned() + "/" + &file_name;
+        let plot_data = collect_previous_data(output_directory, &file_name).unwrap_or_default();
+        if Path::new(&output_file).exists() {
+            match std::fs::File::open(output_file) {
+                Ok(f) => (
+                    serde_json::from_reader(f).unwrap_or(HashMap::new()),
+                    plot_data,
+                ),
+                Err(_) => (HashMap::new(), Vec::new()),
+            }
+        } else {
+            (HashMap::new(), Vec::new())
         }
     } else {
-        HashMap::new()
+        (HashMap::new(), Vec::new())
     };
 
     let window_time = Arc::new(Mutex::new(data));
-    let plot_data = collect_previous_data(&cfg.output_directory, &file_name).unwrap_or_default();
     let config = Arc::new(Mutex::new(cfg));
     {
         let window_time = window_time.clone();
@@ -73,7 +68,8 @@ fn main() -> Result<(), eframe::Error> {
 
             let save_duration = Duration::from_secs(5);
             let check_duration = Duration::from_millis(50);
-            let gap_between_input = Duration::from_secs(5);
+            let long_gap_between_input = Duration::from_secs(10 * 60);
+            let small_gap_between_input = Duration::from_secs(5);
             let mut mouse_position = mouse.coords;
             loop {
                 std::thread::sleep(check_duration);
@@ -102,6 +98,17 @@ fn main() -> Result<(), eframe::Error> {
                     },
                 };
                 if let Ok(mut window_time) = window_time.lock() {
+                    let processes_with_longer_tracking = config
+                        .lock()
+                        .unwrap()
+                        .processes_with_longer_tracking
+                        .clone();
+                    let gap_between_input =
+                        if processes_with_longer_tracking.contains(&active_window.app_name) {
+                            long_gap_between_input
+                        } else {
+                            small_gap_between_input
+                        };
                     if last_input.elapsed() <= gap_between_input {
                         *window_time
                             .entry(active_window.app_name)
@@ -112,14 +119,22 @@ fn main() -> Result<(), eframe::Error> {
                 if last_save.elapsed() > save_duration {
                     last_save = Instant::now();
                     let data = window_time.lock().unwrap().clone();
-                    let output_directory = config.lock().unwrap().output_directory.clone();
-                    match std::fs::File::create(output_directory.to_owned() + "/" + &file_name) {
-                        Ok(f) => {
-                            if let Err(e) = serde_json::to_writer(f, &data) {
-                                eprintln!("Error exporting the data: {}", e);
+                    let output_directory = if let Ok(config) = config.lock() {
+                        config.output_directory.clone()
+                    } else {
+                        None
+                    };
+
+                    if let Some(output_directory) = output_directory {
+                        match std::fs::File::create(output_directory.to_owned() + "/" + &file_name)
+                        {
+                            Ok(f) => {
+                                if let Err(e) = serde_json::to_writer(f, &data) {
+                                    eprintln!("Error exporting the data: {}", e);
+                                }
                             }
+                            Err(e) => eprintln!("Error creating the export file: {}", e),
                         }
-                        Err(e) => eprintln!("Error creating the export file: {}", e),
                     }
                 }
             }
@@ -142,6 +157,7 @@ fn main() -> Result<(), eframe::Error> {
                     close: close_inner,
                     show_plot: false,
                     chart: plot_data,
+                    settings_open: false,
                 })
             }),
         )?;
@@ -193,19 +209,26 @@ struct TimeBack {
     close: Rc<RefCell<bool>>,
     show_plot: bool,
     chart: Vec<egui_plot::Bar>,
+    settings_open: bool,
 }
 
 impl Drop for TimeBack {
     fn drop(&mut self) {
         let data = self.window_time.lock().unwrap().clone();
-        let output_directory = self.config.lock().unwrap().output_directory.clone();
-        let file_name = generate_file_name();
-        serde_json::to_writer(
-            std::fs::File::create(output_directory.to_owned() + "/" + &file_name)
-                .unwrap_or_else(|_| panic!("{} file not possible to create", file_name)),
-            &data,
-        )
-        .unwrap();
+        let output_directory = self
+            .config
+            .lock()
+            .map(|config| config.output_directory.clone())
+            .unwrap();
+        if let Some(output_directory) = output_directory {
+            let file_name = generate_file_name();
+            serde_json::to_writer(
+                std::fs::File::create(output_directory.to_owned() + "/" + &file_name)
+                    .unwrap_or_else(|_| panic!("{} file not possible to create", file_name)),
+                &data,
+            )
+            .unwrap();
+        }
     }
 }
 
@@ -220,6 +243,15 @@ impl eframe::App for TimeBack {
             ui.horizontal(|ui| {
                 ui.heading("Time back!");
                 ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
+                    let config = self.config.lock().map(|config| (*config).clone()).ok();
+                    if let Some(mut config) = config {
+                        if config.output_directory.is_some() && ui.button("Settings").clicked() {
+                            self.settings_open = true;
+                        }
+                        if self.settings_open {
+                            self.display_configuration(ctx, &mut config);
+                        }
+                    }
                     if ui.button("Close").clicked() {
                         *self.close.borrow_mut() = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -228,10 +260,12 @@ impl eframe::App for TimeBack {
             });
 
             let configured = if let Ok(mut config) = self.config.lock() {
-                if !config.configured {
-                    display_configuration(ui, &mut config)
+                if config.output_directory.is_none() {
+                    display_initial_configuration(ui, &mut config);
+                    false
+                } else {
+                    true
                 }
-                config.configured
             } else {
                 false
             };
@@ -254,32 +288,47 @@ impl TimeBack {
             .column(Column::remainder())
             .min_scrolled_height(0.0);
         if let Ok(map) = self.window_time.lock() {
-            table.body(|mut body| {
-                let mut overall = Duration::new(0, 0);
-                for (n, d) in map.iter() {
+            if let Ok(mut config) = self.config.lock() {
+                table.body(|mut body| {
+                    let mut overall = Duration::new(0, 0);
+                    for (n, d) in map.iter() {
+                        let mut checked = config.processes_with_longer_tracking.contains(n);
+                        body.row(table_height, |mut row| {
+                            row.col(|ui| {
+                                if ui.checkbox(&mut checked, n).clicked() {
+                                    if checked {
+                                        config.processes_with_longer_tracking.insert(n.to_string());
+                                    } else {
+                                        config.processes_with_longer_tracking.remove(n);
+                                    }
+                                    match confy::store("time_back", None, &*config) {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            ui.label("Error saving the configuration");
+                                        }
+                                    }
+                                }
+                            });
+                            row.col(|ui| {
+                                ui.label(humantime::Duration::from(*d).to_string());
+                            });
+                            overall += *d;
+                        })
+                    }
+                    body.row(table_height, |mut row| {
+                        row.col(|_ui| {});
+                        row.col(|_ui| {});
+                    });
                     body.row(table_height, |mut row| {
                         row.col(|ui| {
-                            ui.label(n);
+                            ui.label("Overall");
                         });
                         row.col(|ui| {
-                            ui.label(humantime::Duration::from(*d).to_string());
+                            ui.label(humantime::Duration::from(overall).to_string());
                         });
-                        overall += *d;
                     })
-                }
-                body.row(table_height, |mut row| {
-                    row.col(|_ui| {});
-                    row.col(|_ui| {});
                 });
-                body.row(table_height, |mut row| {
-                    row.col(|ui| {
-                        ui.label("Overall");
-                    });
-                    row.col(|ui| {
-                        ui.label(humantime::Duration::from(overall).to_string());
-                    });
-                })
-            });
+            }
         }
         ui.separator();
         if ui.button("Show plot").clicked() {
@@ -292,26 +341,54 @@ impl TimeBack {
             });
         }
     }
+
+    fn display_configuration(&mut self, ctx: &egui::Context, config: &mut Config) {
+        egui::Window::new("Settings")
+            .open(&mut self.settings_open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                if ui.button("Select output directory").clicked() {
+                    config.output_directory =
+                        tinyfiledialogs::select_folder_dialog("Select output directory", "");
+                }
+                ui.label(format!(
+                    "Current output directory: {:?}",
+                    config.output_directory
+                ));
+                ui.separator();
+                ui.heading("Long tracking processes");
+                ui.horizontal(|ui| {
+                    for p in config.processes_with_longer_tracking.iter() {
+                        ui.label(p);
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+                if ui.button("Accept").clicked() {
+                    match confy::store("time_back", None, &*config) {
+                        Ok(_) => {}
+                        Err(_) => {
+                            ui.label("Error saving the configuration");
+                        }
+                    }
+                }
+            });
+    }
 }
 
-fn display_configuration(ui: &mut Ui, config: &mut Config) {
+fn display_initial_configuration(ui: &mut Ui, config: &mut Config) {
     if ui.button("Select output directory").clicked() {
         config.output_directory =
-            match tinyfiledialogs::select_folder_dialog("Select output directory", "") {
-                Some(result) => result,
-                None => DEFAULT_OUTPUT_DIRECTORY.to_string(),
-            };
+            tinyfiledialogs::select_folder_dialog("Select output directory", "");
     }
     ui.label(format!(
-        "Current output directory: {}",
+        "Current output directory: {:?}",
         config.output_directory
     ));
     if ui.button("Accept").clicked() {
-        config.configured = true;
         match confy::store("time_back", None, &*config) {
             Ok(_) => {}
             Err(_) => {
-                config.configured = false;
                 ui.label("Error saving the configuration");
             }
         }
