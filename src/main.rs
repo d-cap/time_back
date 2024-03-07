@@ -279,67 +279,74 @@ impl eframe::App for TimeBack {
 
 impl TimeBack {
     fn display_main_ui(&mut self, ui: &mut Ui) {
-        let table_height = 20.;
-        let table = TableBuilder::new(ui)
-            .striped(true)
-            .resizable(false)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::auto())
-            .column(Column::remainder())
-            .min_scrolled_height(0.0);
-        if let Ok(map) = self.window_time.lock() {
-            if let Ok(mut config) = self.config.lock() {
-                table.body(|mut body| {
-                    let mut overall = Duration::new(0, 0);
-                    for (n, d) in map.iter() {
-                        let mut checked = config.processes_with_longer_tracking.contains(n);
-                        body.row(table_height, |mut row| {
-                            row.col(|ui| {
-                                if ui.checkbox(&mut checked, n).clicked() {
-                                    if checked {
-                                        config.processes_with_longer_tracking.insert(n.to_string());
-                                    } else {
-                                        config.processes_with_longer_tracking.remove(n);
-                                    }
-                                    match confy::store("time_back", None, &*config) {
-                                        Ok(_) => {}
-                                        Err(_) => {
-                                            ui.label("Error saving the configuration");
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                let table_height = 20.;
+                let table = TableBuilder::new(ui)
+                    .striped(true)
+                    .resizable(false)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::auto())
+                    .column(Column::initial(100.))
+                    .min_scrolled_height(500.0);
+                if let Ok(map) = self.window_time.lock() {
+                    if let Ok(mut config) = self.config.lock() {
+                        table.body(|mut body| {
+                            let mut overall = Duration::new(0, 0);
+                            for (n, d) in map.iter() {
+                                let mut checked = config.processes_with_longer_tracking.contains(n);
+                                body.row(table_height, |mut row| {
+                                    row.col(|ui| {
+                                        if ui.checkbox(&mut checked, n).clicked() {
+                                            if checked {
+                                                config
+                                                    .processes_with_longer_tracking
+                                                    .insert(n.to_string());
+                                            } else {
+                                                config.processes_with_longer_tracking.remove(n);
+                                            }
+                                            match confy::store("time_back", None, &*config) {
+                                                Ok(_) => {}
+                                                Err(_) => {
+                                                    ui.label("Error saving the configuration");
+                                                }
+                                            }
                                         }
-                                    }
-                                }
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(humantime::Duration::from(*d).to_string());
+                                    });
+                                    overall += *d;
+                                })
+                            }
+                            body.row(table_height, |mut row| {
+                                row.col(|_ui| {});
+                                row.col(|_ui| {});
                             });
-                            row.col(|ui| {
-                                ui.label(humantime::Duration::from(*d).to_string());
-                            });
-                            overall += *d;
-                        })
+                            body.row(table_height, |mut row| {
+                                row.col(|ui| {
+                                    ui.label("Overall");
+                                });
+                                row.col(|ui| {
+                                    ui.label(humantime::Duration::from(overall).to_string());
+                                });
+                            })
+                        });
                     }
-                    body.row(table_height, |mut row| {
-                        row.col(|_ui| {});
-                        row.col(|_ui| {});
-                    });
-                    body.row(table_height, |mut row| {
-                        row.col(|ui| {
-                            ui.label("Overall");
-                        });
-                        row.col(|ui| {
-                            ui.label(humantime::Duration::from(overall).to_string());
-                        });
-                    })
-                });
-            }
-        }
-        ui.separator();
-        if ui.button("Show plot").clicked() {
-            self.show_plot = !self.show_plot;
-        }
-        if self.show_plot {
-            ui.add_space(5.);
-            Plot::new("Average").show(ui, |plot_ui| {
-                plot_ui.bar_chart(BarChart::new(self.chart.clone()))
+                }
             });
-        }
+            ui.vertical(|ui| {
+                if ui.button("Show plot").clicked() {
+                    self.show_plot = !self.show_plot;
+                }
+                if self.show_plot {
+                    ui.add_space(5.);
+                    Plot::new("Average").show(ui, |plot_ui| {
+                        plot_ui.bar_chart(BarChart::new(self.chart.clone()))
+                    });
+                }
+            });
+        });
     }
 
     fn display_configuration(&mut self, ctx: &egui::Context, config: &mut Config) {
