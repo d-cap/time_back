@@ -37,22 +37,25 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let file_name = generate_file_name();
-    let (data, plot_data) = if let Some(output_directory) = &cfg.output_directory {
+    let (data, sum_plot_data, avg_plot_data) = if let Some(output_directory) = &cfg.output_directory
+    {
         let output_file = output_directory.to_owned() + "/" + &file_name;
-        let plot_data = collect_previous_data(output_directory, &file_name).unwrap_or_default();
+        let (sum_plot_data, avg_plot_data) =
+            collect_previous_data(output_directory, &file_name).unwrap_or_default();
         if Path::new(&output_file).exists() {
             match std::fs::File::open(output_file) {
                 Ok(f) => (
                     serde_json::from_reader(f).unwrap_or(HashMap::new()),
-                    plot_data,
+                    sum_plot_data,
+                    avg_plot_data,
                 ),
-                Err(_) => (HashMap::new(), Vec::new()),
+                Err(_) => (HashMap::new(), Vec::new(), Vec::new()),
             }
         } else {
-            (HashMap::new(), Vec::new())
+            (HashMap::new(), Vec::new(), Vec::new())
         }
     } else {
-        (HashMap::new(), Vec::new())
+        (HashMap::new(), Vec::new(), Vec::new())
     };
 
     let window_time = Arc::new(Mutex::new(data));
@@ -146,7 +149,8 @@ fn main() -> Result<(), eframe::Error> {
         let window_time = window_time.clone();
         let config = config.clone();
         let close_inner = close.clone();
-        let plot_data = plot_data.clone();
+        let sum_plot_data = sum_plot_data.clone();
+        let avg_plot_data = avg_plot_data.clone();
         eframe::run_native(
             "Time back!",
             options.clone(),
@@ -156,7 +160,9 @@ fn main() -> Result<(), eframe::Error> {
                     config,
                     close: close_inner,
                     show_plot: false,
-                    chart: plot_data,
+                    plot_type: PlotType::Avg,
+                    sum_chart: sum_plot_data,
+                    avg_chart: avg_plot_data,
                     settings_open: false,
                 })
             }),
@@ -171,9 +177,10 @@ fn main() -> Result<(), eframe::Error> {
 fn collect_previous_data(
     output_directory: &str,
     current_file: &str,
-) -> Result<Vec<egui_plot::Bar>, std::io::Error> {
+) -> Result<(Vec<egui_plot::Bar>, Vec<egui_plot::Bar>), std::io::Error> {
     let current_file = output_directory.to_owned() + "/" + current_file;
     let mut result: BTreeMap<String, Duration> = BTreeMap::new();
+    let mut file_count = 0;
     for entry in std::fs::read_dir(Path::new(&output_directory))? {
         let entry = entry?;
         let p_entry = entry.path();
@@ -185,15 +192,23 @@ fn collect_previous_data(
                 for (k, v) in data {
                     *result.entry(k).or_default() += v;
                 }
+                file_count += 1;
             }
         }
     }
-    let result = result
-        .into_iter()
+    let result_collect = result
+        .iter()
         .enumerate()
         .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v.as_secs_f64()).name(k))
         .collect::<Vec<_>>();
-    Ok(result)
+    let result_avg = result
+        .iter()
+        .enumerate()
+        .map(|(i, (k, v))| {
+            egui_plot::Bar::new(i as f64, v.as_secs_f64() / file_count as f64).name(k)
+        })
+        .collect::<Vec<_>>();
+    Ok((result_collect, result_avg))
 }
 
 fn generate_file_name() -> String {
@@ -203,12 +218,20 @@ fn generate_file_name() -> String {
         .replace('-', "")
 }
 
+#[derive(PartialEq)]
+enum PlotType {
+    Sum,
+    Avg,
+}
+
 struct TimeBack {
     window_time: Arc<Mutex<HashMap<String, Duration>>>,
     config: Arc<Mutex<Config>>,
     close: Rc<RefCell<bool>>,
     show_plot: bool,
-    chart: Vec<egui_plot::Bar>,
+    plot_type: PlotType,
+    sum_chart: Vec<egui_plot::Bar>,
+    avg_chart: Vec<egui_plot::Bar>,
     settings_open: bool,
 }
 
@@ -340,9 +363,16 @@ impl TimeBack {
                     self.show_plot = !self.show_plot;
                 }
                 if self.show_plot {
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.plot_type, PlotType::Avg, "Avg");
+                        ui.radio_value(&mut self.plot_type, PlotType::Sum, "Sum");
+                    });
                     ui.add_space(5.);
-                    Plot::new("Average").show(ui, |plot_ui| {
-                        plot_ui.bar_chart(BarChart::new(self.chart.clone()))
+                    Plot::new("Sum").show(ui, |plot_ui| {
+                        plot_ui.bar_chart(BarChart::new(match self.plot_type {
+                            PlotType::Sum => self.sum_chart.clone(),
+                            PlotType::Avg => self.avg_chart.clone(),
+                        }));
                     });
                 }
             });
