@@ -49,10 +49,10 @@ fn main() -> Result<(), eframe::Error> {
                     sum_plot_data,
                     avg_plot_data,
                 ),
-                Err(_) => (HashMap::new(), Vec::new(), Vec::new()),
+                Err(_) => (HashMap::new(), sum_plot_data, avg_plot_data),
             }
         } else {
-            (HashMap::new(), Vec::new(), Vec::new())
+            (HashMap::new(), sum_plot_data, avg_plot_data)
         }
     } else {
         (HashMap::new(), Vec::new(), Vec::new())
