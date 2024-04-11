@@ -74,19 +74,20 @@ fn main() -> Result<(), eframe::Error> {
     {
         let window_time = window_time.clone();
         let config = config.clone();
+        // Collect the live data
         std::thread::spawn(move || {
             let mut last_input = Instant::now();
             let mut last_save = Instant::now();
             let device_state = DeviceState::new();
             let mouse: MouseState = device_state.get_mouse();
 
-            let save_duration = Duration::from_secs(5);
-            let check_duration = Duration::from_millis(50);
+            let save_timer = Duration::from_secs(5);
+            let check_timer = Duration::from_millis(50);
             let long_gap_between_input = Duration::from_secs(10 * 60);
             let small_gap_between_input = Duration::from_secs(5);
             let mut mouse_position = mouse.coords;
             loop {
-                std::thread::sleep(check_duration);
+                std::thread::sleep(check_timer);
                 let mouse: MouseState = device_state.get_mouse();
                 let temp_position = mouse.coords;
 
@@ -126,11 +127,11 @@ fn main() -> Result<(), eframe::Error> {
                     if last_input.elapsed() <= gap_between_input {
                         *window_time
                             .entry(active_window.app_name)
-                            .or_insert(Duration::default()) += check_duration;
+                            .or_insert(Duration::default()) += check_timer;
                     }
                 };
 
-                if last_save.elapsed() > save_duration {
+                if last_save.elapsed() > save_timer {
                     last_save = Instant::now();
                     let data = window_time.lock().unwrap().clone();
                     let output_directory = if let Ok(config) = config.lock() {
@@ -172,7 +173,7 @@ fn main() -> Result<(), eframe::Error> {
                     config,
                     close: close_inner,
                     show_plot: false,
-                    plot_type: PlotType::Avg,
+                    plot_type: PlotType::Live,
                     sum_chart: sum_plot_data,
                     avg_chart: avg_plot_data,
                     median_chart: median_plot_data,
@@ -268,6 +269,7 @@ fn generate_file_name() -> String {
 
 #[derive(PartialEq)]
 enum PlotType {
+    Live,
     Sum,
     Avg,
     Median,
@@ -409,11 +411,13 @@ impl TimeBack {
                 }
             });
             ui.vertical(|ui| {
-                if ui.button("Show plot").clicked() {
+                if ui.button("Show graph").clicked() {
                     self.show_plot = !self.show_plot;
                 }
                 if self.show_plot {
+                    ui.label("Only live graph includes today data");
                     ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.plot_type, PlotType::Live, "Live");
                         ui.radio_value(&mut self.plot_type, PlotType::Sum, "Sum");
                         ui.radio_value(&mut self.plot_type, PlotType::Avg, "Avg");
                         ui.radio_value(&mut self.plot_type, PlotType::Median, "Median");
@@ -424,6 +428,19 @@ impl TimeBack {
                             PlotType::Sum => self.sum_chart.clone(),
                             PlotType::Avg => self.avg_chart.clone(),
                             PlotType::Median => self.median_chart.clone(),
+                            PlotType::Live => {
+                                if let Ok(window_time) = self.window_time.lock() {
+                                    window_time
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, (k, v))| {
+                                            egui_plot::Bar::new(i as f64, v.as_secs_f64()).name(k)
+                                        })
+                                        .collect()
+                                } else {
+                                    vec![]
+                                }
+                            }
                         }));
                     });
                 }
