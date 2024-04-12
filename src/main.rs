@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex},
@@ -14,6 +14,7 @@ use device_query::{DeviceQuery, DeviceState, Keycode, MouseState};
 use eframe::egui::{self, Layout, Ui};
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{BarChart, Plot};
+use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]

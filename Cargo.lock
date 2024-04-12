@@ -1633,6 +1633,7 @@ checksum = "290f1a1d9242c78d09ce40a5e87e7554ee637af1351968159f4952f028f75604"
 dependencies = [
  "ahash",
  "allocator-api2",
+ "serde",
 ]
 
 [[package]]
@@ -2913,6 +2914,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "egui_plot",
+ "hashbrown",
  "humantime",
  "png",
  "serde",
