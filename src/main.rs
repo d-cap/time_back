@@ -13,7 +13,7 @@ use active_win_pos_rs::{get_active_window, ActiveWindow, WindowPosition};
 use device_query::{DeviceQuery, DeviceState, Keycode, MouseState};
 use eframe::egui::{self, Layout, Ui};
 use egui_extras::{Column, TableBuilder};
-use egui_plot::{BarChart, Plot};
+use egui_plot::{BarChart, Plot, PlotItem};
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
@@ -38,37 +38,23 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let file_name = generate_file_name();
-    let (data, sum_plot_data, avg_plot_data, median_plot_data) =
-        if let Some(output_directory) = &cfg.output_directory {
-            let output_file = output_directory.to_owned() + "/" + &file_name;
-            let (sum_plot_data, avg_plot_data, median_plot_data) =
-                collect_previous_data(output_directory, &file_name).unwrap_or_default();
-            if Path::new(&output_file).exists() {
-                match std::fs::File::open(output_file) {
-                    Ok(f) => (
-                        serde_json::from_reader(f).unwrap_or(HashMap::new()),
-                        sum_plot_data,
-                        avg_plot_data,
-                        median_plot_data,
-                    ),
-                    Err(_) => (
-                        HashMap::new(),
-                        sum_plot_data,
-                        avg_plot_data,
-                        median_plot_data,
-                    ),
-                }
-            } else {
-                (
-                    HashMap::new(),
-                    sum_plot_data,
-                    avg_plot_data,
-                    median_plot_data,
-                )
+    let (data, graph_data) = if let Some(output_directory) = &cfg.output_directory {
+        let output_file = output_directory.to_owned() + "/" + &file_name;
+        let graph_data = collect_previous_data(output_directory, &file_name).unwrap_or_default();
+        if Path::new(&output_file).exists() {
+            match std::fs::File::open(output_file) {
+                Ok(f) => (
+                    serde_json::from_reader(f).unwrap_or(HashMap::new()),
+                    graph_data,
+                ),
+                Err(_) => (HashMap::new(), graph_data),
             }
         } else {
-            (HashMap::new(), Vec::new(), Vec::new(), Vec::new())
-        };
+            (HashMap::new(), graph_data)
+        }
+    } else {
+        (HashMap::new(), Vec::new())
+    };
 
     let window_time = Arc::new(Mutex::new(data));
     let config = Arc::new(Mutex::new(cfg));
@@ -162,9 +148,7 @@ fn main() -> Result<(), eframe::Error> {
         let window_time = window_time.clone();
         let config = config.clone();
         let close_inner = close.clone();
-        let sum_plot_data = sum_plot_data.clone();
-        let avg_plot_data = avg_plot_data.clone();
-        let median_plot_data = median_plot_data.clone();
+        let graph_data = graph_data.clone();
         eframe::run_native(
             "Time back!",
             options.clone(),
@@ -175,9 +159,7 @@ fn main() -> Result<(), eframe::Error> {
                     close: close_inner,
                     show_plot: false,
                     plot_type: PlotType::Live,
-                    sum_chart: sum_plot_data,
-                    avg_chart: avg_plot_data,
-                    median_chart: median_plot_data,
+                    graph_data,
                     settings_open: false,
                 })
             }),
@@ -192,14 +174,7 @@ fn main() -> Result<(), eframe::Error> {
 fn collect_previous_data(
     output_directory: &str,
     current_file: &str,
-) -> Result<
-    (
-        Vec<egui_plot::Bar>,
-        Vec<egui_plot::Bar>,
-        Vec<egui_plot::Bar>,
-    ),
-    std::io::Error,
-> {
+) -> Result<Vec<Vec<egui_plot::Bar>>, std::io::Error> {
     let current_file = output_directory.to_owned() + "/" + current_file;
     let mut result: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
     let mut file_count = 0;
@@ -218,30 +193,26 @@ fn collect_previous_data(
             }
         }
     }
-    let result_collect = result
+    let mut result_sum = result
         .iter()
-        .enumerate()
-        .map(|(i, (k, v))| {
-            egui_plot::Bar::new(i as f64, v.iter().sum::<Duration>().as_secs_f64()).name(k)
-        })
+        .map(|(k, v)| (k, v.iter().sum::<Duration>().as_secs_f64()))
         .collect::<Vec<_>>();
-    let result_avg = result
+    result_sum.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let mut result_avg = result
         .iter()
-        .enumerate()
-        .map(|(i, (k, v))| {
-            egui_plot::Bar::new(
-                i as f64,
+        .map(|(k, v)| {
+            (
+                k,
                 v.iter().sum::<Duration>().as_secs_f64() / file_count as f64,
             )
-            .name(k)
         })
         .collect::<Vec<_>>();
-    let result_median = result
+    result_avg.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let mut result_median = result
         .iter()
-        .enumerate()
-        .map(|(i, (k, v))| {
-            egui_plot::Bar::new(
-                i as f64,
+        .map(|(k, v)| {
+            (
+                k,
                 if file_count % 2 == 0 {
                     let middle = v.len() / 2;
                     if middle >= 1 {
@@ -255,10 +226,29 @@ fn collect_previous_data(
                     0.
                 },
             )
-            .name(k)
         })
         .collect::<Vec<_>>();
-    Ok((result_collect, result_avg, result_median))
+    result_median.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let mut result = Vec::with_capacity(PlotType::Live as usize);
+    for _ in 0..PlotType::Live as usize {
+        result.push(vec![]);
+    }
+    result[PlotType::Sum as usize] = result_sum
+        .into_iter()
+        .enumerate()
+        .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v).name(k))
+        .collect();
+    result[PlotType::Avg as usize] = result_avg
+        .into_iter()
+        .enumerate()
+        .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v).name(k))
+        .collect();
+    result[PlotType::Median as usize] = result_median
+        .into_iter()
+        .enumerate()
+        .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v).name(k))
+        .collect();
+    Ok(result)
 }
 
 fn generate_file_name() -> String {
@@ -270,10 +260,11 @@ fn generate_file_name() -> String {
 
 #[derive(PartialEq)]
 enum PlotType {
+    Sum = 0,
+    Avg = 1,
+    Median = 2,
+    // Keep this as the last one as a count
     Live,
-    Sum,
-    Avg,
-    Median,
 }
 
 struct TimeBack {
@@ -282,9 +273,7 @@ struct TimeBack {
     close: Rc<RefCell<bool>>,
     show_plot: bool,
     plot_type: PlotType,
-    sum_chart: Vec<egui_plot::Bar>,
-    avg_chart: Vec<egui_plot::Bar>,
-    median_chart: Vec<egui_plot::Bar>,
+    graph_data: Vec<Vec<egui_plot::Bar>>,
     settings_open: bool,
 }
 
@@ -426,9 +415,9 @@ impl TimeBack {
                     ui.add_space(5.);
                     Plot::new("Sum").show(ui, |plot_ui| {
                         plot_ui.bar_chart(BarChart::new(match self.plot_type {
-                            PlotType::Sum => self.sum_chart.clone(),
-                            PlotType::Avg => self.avg_chart.clone(),
-                            PlotType::Median => self.median_chart.clone(),
+                            PlotType::Sum => self.graph_data[PlotType::Sum as usize].clone(),
+                            PlotType::Avg => self.graph_data[PlotType::Avg as usize].clone(),
+                            PlotType::Median => self.graph_data[PlotType::Median as usize].clone(),
                             PlotType::Live => {
                                 if let Ok(window_time) = self.window_time.lock() {
                                     window_time
