@@ -10,12 +10,15 @@ use std::{
 };
 
 use active_win_pos_rs::{get_active_window, ActiveWindow, WindowPosition};
+use app::TimeBack;
 use device_query::{DeviceQuery, DeviceState, Keycode, MouseState};
-use eframe::egui::{self, Layout, Ui};
-use egui_extras::{Column, TableBuilder};
-use egui_plot::{BarChart, Plot, PlotItem};
+use eframe::egui::{self};
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
+use utils::{calculate_avg, calculate_median, calculate_sum, generate_file_name};
+
+mod app;
+mod utils;
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 struct Config {
@@ -38,25 +41,35 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let file_name = generate_file_name();
-    let (data, graph_data) = if let Some(output_directory) = &cfg.output_directory {
+    let (windows_data, input_stats_data, graph_data) = if let Some(output_directory) =
+        &cfg.output_directory
+    {
         let output_file = output_directory.to_owned() + "/" + &file_name;
         let graph_data = collect_previous_data(output_directory, &file_name).unwrap_or_default();
-        if Path::new(&output_file).exists() {
+        let windows_data = if Path::new(&output_file).exists() {
             match std::fs::File::open(output_file) {
-                Ok(f) => (
-                    serde_json::from_reader(f).unwrap_or(HashMap::new()),
-                    graph_data,
-                ),
-                Err(_) => (HashMap::new(), graph_data),
+                Ok(f) => serde_json::from_reader(f).unwrap_or(HashMap::new()),
+                Err(_) => HashMap::new(),
             }
         } else {
-            (HashMap::new(), graph_data)
-        }
+            HashMap::new()
+        };
+
+        let input_stats_file = output_directory.to_owned() + "/input-stats";
+        let input_stats_data = if Path::new(&input_stats_file).exists() {
+            match std::fs::File::open(input_stats_file) {
+                Ok(f) => serde_json::from_reader(f).unwrap_or(HashMap::new()),
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+        (windows_data, input_stats_data, graph_data)
     } else {
-        (HashMap::new(), Vec::new())
+        (HashMap::new(), HashMap::new(), Vec::new())
     };
 
-    let window_time = Arc::new(Mutex::new(data));
+    let window_time = Arc::new(Mutex::new(windows_data));
     let config = Arc::new(Mutex::new(cfg));
     {
         let window_time = window_time.clone();
@@ -149,6 +162,7 @@ fn main() -> Result<(), eframe::Error> {
         let config = config.clone();
         let close_inner = close.clone();
         let graph_data = graph_data.clone();
+        let input_stats = input_stats_data.clone();
         eframe::run_native(
             "Time back!",
             options.clone(),
@@ -161,6 +175,8 @@ fn main() -> Result<(), eframe::Error> {
                     plot_type: PlotType::Live,
                     graph_data,
                     settings_open: false,
+                    input_stats_open: false,
+                    input_stats,
                 })
             }),
         )?;
@@ -176,7 +192,7 @@ fn collect_previous_data(
     current_file: &str,
 ) -> Result<Vec<Vec<egui_plot::Bar>>, std::io::Error> {
     let current_file = output_directory.to_owned() + "/" + current_file;
-    let mut result: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
+    let mut values: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
     let mut file_count = 0;
     for entry in std::fs::read_dir(Path::new(&output_directory))? {
         let entry = entry?;
@@ -187,75 +203,32 @@ fn collect_previous_data(
                 let data: HashMap<String, Duration> =
                     serde_json::from_reader(f).unwrap_or_default();
                 for (k, v) in data {
-                    result.entry(k).or_default().push(v);
+                    values.entry(k).or_default().push(v);
                 }
                 file_count += 1;
             }
         }
     }
-    let mut result_sum = result
-        .iter()
-        .map(|(k, v)| (k, v.iter().sum::<Duration>().as_secs_f64()))
-        .collect::<Vec<_>>();
-    result_sum.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let mut result_avg = result
-        .iter()
-        .map(|(k, v)| {
-            (
-                k,
-                v.iter().sum::<Duration>().as_secs_f64() / file_count as f64,
-            )
-        })
-        .collect::<Vec<_>>();
-    result_avg.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let mut result_median = result
-        .iter()
-        .map(|(k, v)| {
-            (
-                k,
-                if file_count % 2 == 0 {
-                    let middle = v.len() / 2;
-                    if middle >= 1 {
-                        (v[middle - 1] + v[middle]).as_secs_f64() / 2.
-                    } else {
-                        0.
-                    }
-                } else if !v.is_empty() {
-                    v[v.len() / 2].as_secs_f64()
-                } else {
-                    0.
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    result_median.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
     let mut result = Vec::with_capacity(PlotType::Live as usize);
     for _ in 0..PlotType::Live as usize {
         result.push(vec![]);
     }
-    result[PlotType::Sum as usize] = result_sum
+    result[PlotType::Sum as usize] = calculate_sum(&values)
         .into_iter()
         .enumerate()
         .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v).name(k))
         .collect();
-    result[PlotType::Avg as usize] = result_avg
+    result[PlotType::Avg as usize] = calculate_avg(&values, file_count)
         .into_iter()
         .enumerate()
         .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v).name(k))
         .collect();
-    result[PlotType::Median as usize] = result_median
+    result[PlotType::Median as usize] = calculate_median(&values)
         .into_iter()
         .enumerate()
         .map(|(i, (k, v))| egui_plot::Bar::new(i as f64, v).name(k))
         .collect();
     Ok(result)
-}
-
-fn generate_file_name() -> String {
-    chrono::Local::now()
-        .date_naive()
-        .to_string()
-        .replace('-', "")
 }
 
 #[derive(PartialEq)]
@@ -265,228 +238,4 @@ enum PlotType {
     Median = 2,
     // Keep this as the last one as a count
     Live,
-}
-
-struct TimeBack {
-    window_time: Arc<Mutex<HashMap<String, Duration>>>,
-    config: Arc<Mutex<Config>>,
-    close: Rc<RefCell<bool>>,
-    show_plot: bool,
-    plot_type: PlotType,
-    graph_data: Vec<Vec<egui_plot::Bar>>,
-    settings_open: bool,
-}
-
-impl Drop for TimeBack {
-    fn drop(&mut self) {
-        let data = self.window_time.lock().unwrap().clone();
-        let output_directory = self
-            .config
-            .lock()
-            .map(|config| config.output_directory.clone())
-            .unwrap();
-        if let Some(output_directory) = output_directory {
-            let file_name = generate_file_name();
-            serde_json::to_writer(
-                std::fs::File::create(output_directory.to_owned() + "/" + &file_name)
-                    .unwrap_or_else(|_| panic!("{} file not possible to create", file_name)),
-                &data,
-            )
-            .unwrap();
-        }
-    }
-}
-
-impl eframe::App for TimeBack {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(ppp) = ctx.native_pixels_per_point() {
-            ctx.set_pixels_per_point(ppp);
-        } else {
-            ctx.set_pixels_per_point(2.);
-        }
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Time back!");
-                ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                    let config = self.config.lock().map(|config| (*config).clone()).ok();
-                    if let Some(mut config) = config {
-                        if config.output_directory.is_some() && ui.button("Settings").clicked() {
-                            self.settings_open = true;
-                        }
-                        if self.settings_open {
-                            self.display_configuration(ctx, &mut config);
-                        }
-                    }
-                    if ui.button("Close").clicked() {
-                        *self.close.borrow_mut() = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-            });
-
-            let configured = if let Ok(mut config) = self.config.lock() {
-                if config.output_directory.is_none() {
-                    display_initial_configuration(ui, &mut config);
-                    false
-                } else {
-                    true
-                }
-            } else {
-                false
-            };
-            if configured {
-                self.display_main_ui(ui);
-            }
-        });
-        ctx.request_repaint();
-    }
-}
-
-impl TimeBack {
-    fn display_main_ui(&mut self, ui: &mut Ui) {
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                let table_height = 20.;
-                let table = TableBuilder::new(ui)
-                    .striped(true)
-                    .resizable(false)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::auto())
-                    .column(Column::initial(100.))
-                    .min_scrolled_height(500.0);
-                if let Ok(map) = self.window_time.lock() {
-                    if let Ok(mut config) = self.config.lock() {
-                        table.body(|mut body| {
-                            let mut overall = Duration::new(0, 0);
-                            for (n, d) in map.iter() {
-                                let mut checked = config.processes_with_longer_tracking.contains(n);
-                                body.row(table_height, |mut row| {
-                                    row.col(|ui| {
-                                        if ui.checkbox(&mut checked, n).clicked() {
-                                            if checked {
-                                                config
-                                                    .processes_with_longer_tracking
-                                                    .insert(n.to_string());
-                                            } else {
-                                                config.processes_with_longer_tracking.remove(n);
-                                            }
-                                            match confy::store("time_back", None, &*config) {
-                                                Ok(_) => {}
-                                                Err(_) => {
-                                                    ui.label("Error saving the configuration");
-                                                }
-                                            }
-                                        }
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(humantime::Duration::from(*d).to_string());
-                                    });
-                                    overall += *d;
-                                })
-                            }
-                            body.row(table_height, |mut row| {
-                                row.col(|_ui| {});
-                                row.col(|_ui| {});
-                            });
-                            body.row(table_height, |mut row| {
-                                row.col(|ui| {
-                                    ui.label("Overall");
-                                });
-                                row.col(|ui| {
-                                    ui.label(humantime::Duration::from(overall).to_string());
-                                });
-                            })
-                        });
-                    }
-                }
-            });
-            ui.vertical(|ui| {
-                if ui.button("Show graph").clicked() {
-                    self.show_plot = !self.show_plot;
-                }
-                if self.show_plot {
-                    ui.label("Only live graph includes today data");
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.plot_type, PlotType::Live, "Live");
-                        ui.radio_value(&mut self.plot_type, PlotType::Sum, "Sum");
-                        ui.radio_value(&mut self.plot_type, PlotType::Avg, "Avg");
-                        ui.radio_value(&mut self.plot_type, PlotType::Median, "Median");
-                    });
-                    ui.add_space(5.);
-                    Plot::new("Sum").show(ui, |plot_ui| {
-                        plot_ui.bar_chart(BarChart::new(match self.plot_type {
-                            PlotType::Sum => self.graph_data[PlotType::Sum as usize].clone(),
-                            PlotType::Avg => self.graph_data[PlotType::Avg as usize].clone(),
-                            PlotType::Median => self.graph_data[PlotType::Median as usize].clone(),
-                            PlotType::Live => {
-                                if let Ok(window_time) = self.window_time.lock() {
-                                    window_time
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, (k, v))| {
-                                            egui_plot::Bar::new(i as f64, v.as_secs_f64()).name(k)
-                                        })
-                                        .collect()
-                                } else {
-                                    vec![]
-                                }
-                            }
-                        }));
-                    });
-                }
-            });
-        });
-    }
-
-    fn display_configuration(&mut self, ctx: &egui::Context, config: &mut Config) {
-        egui::Window::new("Settings")
-            .open(&mut self.settings_open)
-            .resizable(false)
-            .show(ctx, |ui| {
-                if ui.button("Select output directory").clicked() {
-                    config.output_directory =
-                        tinyfiledialogs::select_folder_dialog("Select output directory", "");
-                }
-                ui.label(format!(
-                    "Current output directory: {:?}",
-                    config.output_directory
-                ));
-                ui.separator();
-                ui.heading("Long tracking processes");
-                ui.horizontal(|ui| {
-                    for p in config.processes_with_longer_tracking.iter() {
-                        ui.label(p);
-                        ui.end_row();
-                    }
-                });
-                ui.separator();
-                if ui.button("Accept").clicked() {
-                    match confy::store("time_back", None, &*config) {
-                        Ok(_) => {}
-                        Err(_) => {
-                            ui.label("Error saving the configuration");
-                        }
-                    }
-                }
-            });
-    }
-}
-
-fn display_initial_configuration(ui: &mut Ui, config: &mut Config) {
-    if ui.button("Select output directory").clicked() {
-        config.output_directory =
-            tinyfiledialogs::select_folder_dialog("Select output directory", "");
-    }
-    ui.label(format!(
-        "Current output directory: {:?}",
-        config.output_directory
-    ));
-    if ui.button("Accept").clicked() {
-        match confy::store("time_back", None, &*config) {
-            Ok(_) => {}
-            Err(_) => {
-                ui.label("Error saving the configuration");
-            }
-        }
-    }
 }
