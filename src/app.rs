@@ -5,18 +5,15 @@ use std::{
     time::Duration,
 };
 
+use dashmap::DashMap;
 use eframe::egui::{self, Layout, Ui};
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{BarChart, Plot};
 
-use hashbrown::HashMap;
-
-use crate::{utils::generate_file_name, Config, PlotType};
-
-pub enum InputType {}
+use crate::{utils::generate_file_name, Config, PlotType, INPUT_STATS_FILE};
 
 pub struct TimeBack {
-    pub window_time: Arc<Mutex<HashMap<String, Duration>>>,
+    pub window_time: Arc<DashMap<String, Duration>>,
     pub config: Arc<Mutex<Config>>,
     pub close: Rc<RefCell<bool>>,
     pub show_plot: bool,
@@ -24,12 +21,11 @@ pub struct TimeBack {
     pub graph_data: Vec<Vec<egui_plot::Bar>>,
     pub settings_open: bool,
     pub input_stats_open: bool,
-    pub input_stats: HashMap<String, u32>,
+    pub input_stats: Arc<DashMap<String, u32>>,
 }
 
 impl Drop for TimeBack {
     fn drop(&mut self) {
-        let data = self.window_time.lock().unwrap().clone();
         let output_directory = self
             .config
             .lock()
@@ -40,7 +36,13 @@ impl Drop for TimeBack {
             serde_json::to_writer(
                 std::fs::File::create(output_directory.to_owned() + "/" + &file_name)
                     .unwrap_or_else(|_| panic!("{} file not possible to create", file_name)),
-                &data,
+                &self.window_time,
+            )
+            .unwrap();
+            serde_json::to_writer(
+                std::fs::File::create(output_directory.to_owned() + INPUT_STATS_FILE)
+                    .unwrap_or_else(|_| panic!("{} file not possible to create", file_name)),
+                &self.input_stats,
             )
             .unwrap();
         }
@@ -72,7 +74,7 @@ impl eframe::App for TimeBack {
                             self.display_configuration(ctx, &mut config);
                         }
                         if self.input_stats_open {
-                            self.display_input_stats(ctx, &mut config);
+                            self.display_input_stats(ctx);
                         }
                     }
                     if ui.button("Close").clicked() {
@@ -112,50 +114,49 @@ impl TimeBack {
                     .column(Column::auto())
                     .column(Column::initial(100.))
                     .min_scrolled_height(500.0);
-                if let Ok(map) = self.window_time.lock() {
-                    if let Ok(mut config) = self.config.lock() {
-                        table.body(|mut body| {
-                            let mut overall = Duration::new(0, 0);
-                            for (n, d) in map.iter() {
-                                let mut checked = config.processes_with_longer_tracking.contains(n);
-                                body.row(table_height, |mut row| {
-                                    row.col(|ui| {
-                                        if ui.checkbox(&mut checked, n).clicked() {
-                                            if checked {
-                                                config
-                                                    .processes_with_longer_tracking
-                                                    .insert(n.to_string());
-                                            } else {
-                                                config.processes_with_longer_tracking.remove(n);
-                                            }
-                                            match confy::store("time_back", None, &*config) {
-                                                Ok(_) => {}
-                                                Err(_) => {
-                                                    ui.label("Error saving the configuration");
-                                                }
+                if let Ok(mut config) = self.config.lock() {
+                    table.body(|mut body| {
+                        let mut overall = Duration::new(0, 0);
+                        for v in self.window_time.iter() {
+                            let (n, d) = v.pair();
+                            let mut checked = config.processes_with_longer_tracking.contains(n);
+                            body.row(table_height, |mut row| {
+                                row.col(|ui| {
+                                    if ui.checkbox(&mut checked, n).clicked() {
+                                        if checked {
+                                            config
+                                                .processes_with_longer_tracking
+                                                .insert(n.to_string());
+                                        } else {
+                                            config.processes_with_longer_tracking.remove(n);
+                                        }
+                                        match confy::store("time_back", None, &*config) {
+                                            Ok(_) => {}
+                                            Err(_) => {
+                                                ui.label("Error saving the configuration");
                                             }
                                         }
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(humantime::Duration::from(*d).to_string());
-                                    });
-                                    overall += *d;
-                                })
-                            }
-                            body.row(table_height, |mut row| {
-                                row.col(|_ui| {});
-                                row.col(|_ui| {});
-                            });
-                            body.row(table_height, |mut row| {
-                                row.col(|ui| {
-                                    ui.label("Overall");
+                                    }
                                 });
                                 row.col(|ui| {
-                                    ui.label(humantime::Duration::from(overall).to_string());
+                                    ui.label(humantime::Duration::from(*d).to_string());
                                 });
+                                overall += *d;
                             })
+                        }
+                        body.row(table_height, |mut row| {
+                            row.col(|_ui| {});
+                            row.col(|_ui| {});
                         });
-                    }
+                        body.row(table_height, |mut row| {
+                            row.col(|ui| {
+                                ui.label("Overall");
+                            });
+                            row.col(|ui| {
+                                ui.label(humantime::Duration::from(overall).to_string());
+                            });
+                        })
+                    });
                 }
             });
             ui.vertical(|ui| {
@@ -176,19 +177,15 @@ impl TimeBack {
                             PlotType::Sum => self.graph_data[PlotType::Sum as usize].clone(),
                             PlotType::Avg => self.graph_data[PlotType::Avg as usize].clone(),
                             PlotType::Median => self.graph_data[PlotType::Median as usize].clone(),
-                            PlotType::Live => {
-                                if let Ok(window_time) = self.window_time.lock() {
-                                    window_time
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, (k, v))| {
-                                            egui_plot::Bar::new(i as f64, v.as_secs_f64()).name(k)
-                                        })
-                                        .collect()
-                                } else {
-                                    vec![]
-                                }
-                            }
+                            PlotType::Live => self
+                                .window_time
+                                .iter()
+                                .enumerate()
+                                .map(|(i, v)| {
+                                    let (k, v) = v.pair();
+                                    egui_plot::Bar::new(i as f64, v.as_secs_f64()).name(k)
+                                })
+                                .collect(),
                         }));
                     });
                 }
@@ -213,7 +210,7 @@ impl TimeBack {
                 ui.heading("Long tracking processes");
                 ui.horizontal(|ui| {
                     for p in config.processes_with_longer_tracking.iter() {
-                        ui.label(p);
+                        ui.label(&*p);
                         ui.end_row();
                     }
                 });
@@ -229,7 +226,16 @@ impl TimeBack {
             });
     }
 
-    fn display_input_stats(&mut self, ctx: &egui::Context, config: &mut Config) {
+    fn display_input_stats(&mut self, ctx: &egui::Context) {
+        let mut data: Vec<(String, u32)> = self
+            .input_stats
+            .iter()
+            .map(|v| {
+                let (k, v) = v.pair();
+                (k.to_string(), *v)
+            })
+            .collect::<Vec<_>>();
+        data.sort_by(|a, b| b.1.cmp(&a.1));
         egui::Window::new("Input stats")
             .open(&mut self.input_stats_open)
             .resizable(true)
@@ -243,39 +249,22 @@ impl TimeBack {
                         .column(Column::auto())
                         .column(Column::initial(100.))
                         .min_scrolled_height(500.0);
-                    if let Ok(mut config) = self.config.lock() {
-                        table.body(|mut body| {
-                            for (n, c) in self.input_stats.iter() {
-                                let mut checked = config.processes_with_longer_tracking.contains(n);
-                                body.row(table_height, |mut row| {
-                                    row.col(|ui| {
-                                        if ui.checkbox(&mut checked, n).clicked() {
-                                            if checked {
-                                                config
-                                                    .processes_with_longer_tracking
-                                                    .insert(n.to_string());
-                                            } else {
-                                                config.processes_with_longer_tracking.remove(n);
-                                            }
-                                            match confy::store("time_back", None, &*config) {
-                                                Ok(_) => {}
-                                                Err(_) => {
-                                                    ui.label("Error saving the configuration");
-                                                }
-                                            }
-                                        }
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(c.to_string());
-                                    });
-                                })
-                            }
+                    table.body(|mut body| {
+                        for (n, c) in data {
                             body.row(table_height, |mut row| {
-                                row.col(|_ui| {});
-                                row.col(|_ui| {});
-                            });
+                                row.col(|ui| {
+                                    ui.label(n.to_string());
+                                });
+                                row.col(|ui| {
+                                    ui.label(c.to_string());
+                                });
+                            })
+                        }
+                        body.row(table_height, |mut row| {
+                            row.col(|_ui| {});
+                            row.col(|_ui| {});
                         });
-                    }
+                    });
                 });
             });
     }

@@ -11,19 +11,21 @@ use std::{
 
 use active_win_pos_rs::{get_active_window, ActiveWindow, WindowPosition};
 use app::TimeBack;
+use dashmap::{DashMap, DashSet};
 use device_query::{DeviceQuery, DeviceState, Keycode, MouseState};
-use eframe::egui::{self};
-use hashbrown::{HashMap, HashSet};
+use eframe::{egui, glow::INT_SAMPLER_2D_MULTISAMPLE_ARRAY};
 use serde::{Deserialize, Serialize};
 use utils::{calculate_avg, calculate_median, calculate_sum, generate_file_name};
 
 mod app;
 mod utils;
 
+const INPUT_STATS_FILE: &str = "/input-stats";
+
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 struct Config {
     output_directory: Option<String>,
-    processes_with_longer_tracking: HashSet<String>,
+    processes_with_longer_tracking: DashSet<String>,
 }
 
 fn main() -> Result<(), eframe::Error> {
@@ -48,32 +50,34 @@ fn main() -> Result<(), eframe::Error> {
         let graph_data = collect_previous_data(output_directory, &file_name).unwrap_or_default();
         let windows_data = if Path::new(&output_file).exists() {
             match std::fs::File::open(output_file) {
-                Ok(f) => serde_json::from_reader(f).unwrap_or(HashMap::new()),
-                Err(_) => HashMap::new(),
+                Ok(f) => serde_json::from_reader(f).unwrap_or(DashMap::new()),
+                Err(_) => DashMap::new(),
             }
         } else {
-            HashMap::new()
+            DashMap::new()
         };
 
-        let input_stats_file = output_directory.to_owned() + "/input-stats";
+        let input_stats_file = output_directory.to_owned() + INPUT_STATS_FILE;
         let input_stats_data = if Path::new(&input_stats_file).exists() {
             match std::fs::File::open(input_stats_file) {
-                Ok(f) => serde_json::from_reader(f).unwrap_or(HashMap::new()),
-                Err(_) => HashMap::new(),
+                Ok(f) => serde_json::from_reader(f).unwrap_or(DashMap::new()),
+                Err(_) => DashMap::new(),
             }
         } else {
-            HashMap::new()
+            DashMap::new()
         };
         (windows_data, input_stats_data, graph_data)
     } else {
-        (HashMap::new(), HashMap::new(), Vec::new())
+        (DashMap::new(), DashMap::new(), Vec::new())
     };
 
-    let window_time = Arc::new(Mutex::new(windows_data));
+    let window_time = Arc::new(windows_data);
     let config = Arc::new(Mutex::new(cfg));
+    let input_stats = Arc::new(input_stats_data);
     {
         let window_time = window_time.clone();
         let config = config.clone();
+        let input_stats = input_stats.clone();
         // Collect the live data
         std::thread::spawn(move || {
             let mut last_input = Instant::now();
@@ -98,6 +102,8 @@ fn main() -> Result<(), eframe::Error> {
 
                 let keys: Vec<Keycode> = device_state.get_keys();
                 if !keys.is_empty() {
+                    keys.into_iter()
+                        .for_each(|k| *input_stats.entry(k.to_string()).or_insert(0) += 1);
                     last_input = Instant::now();
                 }
 
@@ -112,28 +118,26 @@ fn main() -> Result<(), eframe::Error> {
                         position: WindowPosition::default(),
                     },
                 };
-                if let Ok(mut window_time) = window_time.lock() {
-                    let processes_with_longer_tracking = config
-                        .lock()
-                        .unwrap()
-                        .processes_with_longer_tracking
-                        .clone();
-                    let gap_between_input =
-                        if processes_with_longer_tracking.contains(&active_window.app_name) {
-                            long_gap_between_input
-                        } else {
-                            small_gap_between_input
-                        };
-                    if last_input.elapsed() <= gap_between_input {
-                        *window_time
-                            .entry(active_window.app_name)
-                            .or_insert(Duration::default()) += check_timer;
-                    }
-                };
+
+                let processes_with_longer_tracking = config
+                    .lock()
+                    .unwrap()
+                    .processes_with_longer_tracking
+                    .clone();
+                let gap_between_input =
+                    if processes_with_longer_tracking.contains(&active_window.app_name) {
+                        long_gap_between_input
+                    } else {
+                        small_gap_between_input
+                    };
+                if last_input.elapsed() <= gap_between_input {
+                    *window_time
+                        .entry(active_window.app_name)
+                        .or_insert(Duration::default()) += check_timer;
+                }
 
                 if last_save.elapsed() > save_timer {
                     last_save = Instant::now();
-                    let data = window_time.lock().unwrap().clone();
                     let output_directory = if let Ok(config) = config.lock() {
                         config.output_directory.clone()
                     } else {
@@ -144,11 +148,22 @@ fn main() -> Result<(), eframe::Error> {
                         match std::fs::File::create(output_directory.to_owned() + "/" + &file_name)
                         {
                             Ok(f) => {
-                                if let Err(e) = serde_json::to_writer(f, &data) {
+                                if let Err(e) = serde_json::to_writer(f, &window_time) {
                                     eprintln!("Error exporting the data: {}", e);
                                 }
                             }
-                            Err(e) => eprintln!("Error creating the export file: {}", e),
+                            Err(e) => eprintln!("Error creating the data export file: {}", e),
+                        }
+                        match std::fs::File::create(output_directory.to_owned() + INPUT_STATS_FILE)
+                        {
+                            Ok(f) => {
+                                if let Err(e) = serde_json::to_writer(f, &input_stats) {
+                                    eprintln!("Error exporting the input stats: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error creating the input stats export file: {}", e)
+                            }
                         }
                     }
                 }
@@ -162,7 +177,7 @@ fn main() -> Result<(), eframe::Error> {
         let config = config.clone();
         let close_inner = close.clone();
         let graph_data = graph_data.clone();
-        let input_stats = input_stats_data.clone();
+        let input_stats = input_stats.clone();
         eframe::run_native(
             "Time back!",
             options.clone(),
@@ -200,7 +215,7 @@ fn collect_previous_data(
         let s_entry = p_entry.to_str().unwrap_or_default();
         if current_file != s_entry {
             if let Ok(f) = std::fs::File::open(entry.path()) {
-                let data: HashMap<String, Duration> =
+                let data: DashMap<String, Duration> =
                     serde_json::from_reader(f).unwrap_or_default();
                 for (k, v) in data {
                     values.entry(k).or_default().push(v);
