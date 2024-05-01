@@ -12,8 +12,8 @@ use std::{
 use active_win_pos_rs::{get_active_window, ActiveWindow, WindowPosition};
 use app::TimeBack;
 use dashmap::{DashMap, DashSet};
-use device_query::{DeviceQuery, DeviceState, Keycode, MouseState};
-use eframe::{egui, glow::INT_SAMPLER_2D_MULTISAMPLE_ARRAY};
+use device_query::{DeviceQuery, DeviceState, MouseState};
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 use utils::{calculate_avg, calculate_median, calculate_sum, generate_file_name};
 
@@ -85,6 +85,7 @@ fn main() -> Result<(), eframe::Error> {
             let device_state = DeviceState::new();
             let mouse: MouseState = device_state.get_mouse();
 
+            let input_timer = Duration::from_millis(75);
             let save_timer = Duration::from_secs(5);
             let check_timer = Duration::from_millis(50);
             let long_gap_between_input = Duration::from_secs(10 * 60);
@@ -95,15 +96,29 @@ fn main() -> Result<(), eframe::Error> {
                 let mouse: MouseState = device_state.get_mouse();
                 let temp_position = mouse.coords;
 
+                if last_input.elapsed() > input_timer {
+                    for (i, button_pressed) in mouse.button_pressed.iter().enumerate() {
+                        if *button_pressed {
+                            *input_stats
+                                .entry(format!("Mouse click: {}", i))
+                                .or_insert(0) += 1;
+                        }
+                    }
+                }
                 if mouse_position != temp_position {
+                    if last_input.elapsed() > input_timer {
+                        *input_stats.entry("Mouse move".to_string()).or_insert(0) += 1;
+                    }
                     mouse_position = temp_position;
                     last_input = Instant::now();
                 }
 
-                let keys: Vec<Keycode> = device_state.get_keys();
+                let keys = device_state.get_keys();
                 if !keys.is_empty() {
-                    keys.into_iter()
-                        .for_each(|k| *input_stats.entry(k.to_string()).or_insert(0) += 1);
+                    if last_input.elapsed() > input_timer {
+                        keys.into_iter()
+                            .for_each(|k| *input_stats.entry(k.to_string()).or_insert(0) += 1);
+                    }
                     last_input = Instant::now();
                 }
 

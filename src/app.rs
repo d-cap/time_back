@@ -114,7 +114,7 @@ impl TimeBack {
                     .column(Column::auto())
                     .column(Column::initial(100.))
                     .min_scrolled_height(500.0);
-                if let Ok(mut config) = self.config.lock() {
+                if let Ok(config) = self.config.lock() {
                     table.body(|mut body| {
                         let mut overall = Duration::new(0, 0);
                         for v in self.window_time.iter() {
