@@ -8,11 +8,14 @@ use std::{
 use dashmap::DashMap;
 use eframe::egui::{self, Layout, Ui};
 use egui_extras::{Column, TableBuilder};
+use egui_file_dialog::FileDialog;
 use egui_plot::{BarChart, Plot};
 
 use crate::{utils::generate_file_name, Config, PlotType, INPUT_STATS_FILE};
 
 pub struct TimeBack {
+    pub file_dialog: FileDialog,
+    pub temp_config_path: Option<String>,
     pub window_time: Arc<DashMap<String, Duration>>,
     pub config: Arc<Mutex<Config>>,
     pub close: Rc<RefCell<bool>>,
@@ -84,9 +87,8 @@ impl eframe::App for TimeBack {
                 });
             });
 
-            let configured = if let Ok(mut config) = self.config.lock() {
+            let configured = if let Ok(config) = self.config.lock() {
                 if config.output_directory.is_none() {
-                    display_initial_configuration(ui, &mut config);
                     false
                 } else {
                     true
@@ -96,6 +98,8 @@ impl eframe::App for TimeBack {
             };
             if configured {
                 self.display_main_ui(ui);
+            } else {
+                self.display_initial_configuration(ctx, ui);
             }
         });
         ctx.request_repaint();
@@ -199,12 +203,17 @@ impl TimeBack {
             .resizable(false)
             .show(ctx, |ui| {
                 if ui.button("Select output directory").clicked() {
+                    self.file_dialog.pick_directory();
+                }
+                self.file_dialog.update(ctx);
+
+                if let Some(path) = self.file_dialog.take_picked() {
                     config.output_directory =
-                        tinyfiledialogs::select_folder_dialog("Select output directory", "");
+                        path.to_path_buf().into_os_string().into_string().ok();
                 }
                 ui.label(format!(
                     "Current output directory: {:?}",
-                    config.output_directory
+                    config.output_directory.as_ref().map_or("", |d| &d)
                 ));
                 ui.separator();
                 ui.heading("Long tracking processes");
@@ -216,6 +225,9 @@ impl TimeBack {
                 });
                 ui.separator();
                 if ui.button("Accept").clicked() {
+                    if self.temp_config_path.is_some() {
+                        config.output_directory = self.temp_config_path.clone();
+                    }
                     match confy::store("time_back", None, &*config) {
                         Ok(_) => {}
                         Err(_) => {
@@ -248,42 +260,73 @@ impl TimeBack {
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                         .column(Column::auto())
                         .column(Column::initial(100.))
+                        .column(Column::initial(100.))
                         .min_scrolled_height(500.0);
-                    table.body(|mut body| {
-                        for (n, c) in data {
+                    table
+                        .header(20.0, |mut header| {
+                            header.col(|ui| {
+                                ui.heading("Input");
+                            });
+                            header.col(|ui| {
+                                ui.heading("Count");
+                            });
+                            header.col(|ui| {
+                                ui.heading("Diff");
+                            });
+                        })
+                        .body(|mut body| {
+                            let mut prev: i32 = 0;
+                            for (n, c) in data {
+                                body.row(table_height, |mut row| {
+                                    row.col(|ui| {
+                                        ui.label(n.to_string());
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(c.to_string());
+                                    });
+                                    row.col(|ui| {
+                                        ui.label((0.max(prev - c as i32)).to_string());
+                                    });
+                                });
+                                prev = c as i32;
+                            }
                             body.row(table_height, |mut row| {
-                                row.col(|ui| {
-                                    ui.label(n.to_string());
-                                });
-                                row.col(|ui| {
-                                    ui.label(c.to_string());
-                                });
-                            })
-                        }
-                        body.row(table_height, |mut row| {
-                            row.col(|_ui| {});
-                            row.col(|_ui| {});
+                                row.col(|_ui| {});
+                                row.col(|_ui| {});
+                                row.col(|_ui| {});
+                            });
                         });
-                    });
                 });
             });
     }
-}
 
-fn display_initial_configuration(ui: &mut Ui, config: &mut Config) {
-    if ui.button("Select output directory").clicked() {
-        config.output_directory =
-            tinyfiledialogs::select_folder_dialog("Select output directory", "");
-    }
-    ui.label(format!(
-        "Current output directory: {:?}",
-        config.output_directory
-    ));
-    if ui.button("Accept").clicked() {
-        match confy::store("time_back", None, &*config) {
-            Ok(_) => {}
-            Err(_) => {
-                ui.label("Error saving the configuration");
+    fn display_initial_configuration(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        if ui.button("Select output directory").clicked() {
+            self.file_dialog.pick_directory();
+        }
+        self.file_dialog.update(ctx);
+
+        if let Some(path) = self.file_dialog.take_picked() {
+            self.temp_config_path = path.to_path_buf().into_os_string().into_string().ok();
+        }
+
+        if let Ok(config) = self.config.lock() {
+            ui.label(format!(
+                "Current output directory: {:?}",
+                config.output_directory.as_ref().map_or("", |d| &d)
+            ));
+        }
+        if ui.button("Accept").clicked() {
+            if let Ok(mut config) = self.config.lock() {
+                if self.temp_config_path.is_some() {
+                    config.output_directory = self.temp_config_path.clone();
+                }
+                match confy::store("time_back", None, &*config) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        ui.label("Error saving the configuration");
+                    }
+                }
             }
         }
     }
