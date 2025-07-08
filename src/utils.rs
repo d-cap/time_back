@@ -15,16 +15,13 @@ pub fn calculate_sum(data: &BTreeMap<String, Vec<Duration>>) -> Vec<(&str, f64)>
     result_sum
 }
 
-pub fn calculate_avg(
-    data: &BTreeMap<String, Vec<Duration>>,
-    file_count: usize,
-) -> Vec<(&str, f64)> {
+pub fn calculate_avg(data: &BTreeMap<String, Vec<Duration>>) -> Vec<(&str, f64)> {
     let mut result_avg = data
         .iter()
         .map(|(k, v)| {
             (
                 k.as_str(),
-                v.iter().sum::<Duration>().as_secs_f64() / file_count as f64,
+                v.iter().sum::<Duration>().as_secs_f64() / v.len() as f64,
             )
         })
         .collect::<Vec<_>>();
