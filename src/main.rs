@@ -124,6 +124,7 @@ fn spawn_background_thread(
                         *input_stats
                             .entry(format!("Mouse click: {}", i))
                             .or_insert(0) += 1;
+                        last_input = Instant::now();
                     }
                 }
             }
@@ -140,8 +141,8 @@ fn spawn_background_thread(
                 if !keys.is_empty() {
                     keys.into_iter()
                         .for_each(|k| *input_stats.entry(k.to_string()).or_insert(0) += 1);
+                    last_input = Instant::now();
                 }
-                last_input = Instant::now();
             }
 
             let active_window = match get_active_window() {
